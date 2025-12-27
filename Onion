@@ -1,0 +1,100 @@
+import streamlit as st
+import cv2
+import numpy as np
+import pandas as pd
+import plotly.express as px
+
+# --- APP CONFIGURATION ---
+st.set_page_config(page_title="Onion AI Procurement", layout="wide")
+st.title("🧅 Onion Size Distribution Predictor")
+st.write("Upload a photo of your 3-bag sample to predict the lot quality.")
+
+# --- THE LOGIC ENGINE ---
+def analyze_onions(uploaded_file, ref_diameter_mm=25):
+    # Convert uploaded file to OpenCV format
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    
+    # 1. Image Processing (Grayscale & Blur)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.medianBlur(gray, 5)
+    
+    # 2. Detect Onions using Hough Circles
+    # These parameters (50, 30) are tuned for circular objects
+    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 50,
+                               param1=100, param2=30, minRadius=30, maxRadius=150)
+    
+    if circles is not None:
+        circles = np.uint16(np.around(circles))
+        # Sort circles by X-position to find the reference object (left-most)
+        sorted_circles = circles[0][circles[0][:, 0].argsort()]
+        
+        # Calculate Scale (Pixels per MM)
+        ref_pixel_width = sorted_circles[0][2] * 2
+        pixels_per_mm = ref_pixel_width / ref_diameter_mm
+        
+        # Calculate diameters for the rest
+        diameters = []
+        for i in sorted_circles[1:]:
+            d_mm = (i[2] * 2) / pixels_per_mm
+            diameters.append(d_mm)
+            # Draw green circles on the onions
+            cv2.circle(img, (i[0], i[1]), i[2], (0, 255, 0), 3)
+        
+        # Draw a blue circle on the reference object
+        cv2.circle(img, (sorted_circles[0][0], sorted_circles[0][1]), sorted_circles[0][2], (255, 0, 0), 3)
+            
+        return diameters, img
+    return None, img
+
+# --- SIDEBAR ---
+st.sidebar.header("Procurement Settings")
+ref_size = st.sidebar.number_input("Reference Coin Size (mm)", value=25)
+total_bags = st.sidebar.number_input("Total Bags in Truck", value=500)
+threshold_small = st.sidebar.slider("Max Allowed Small Onions (%)", 0, 100, 15)
+
+# --- FILE UPLOADER ---
+# Use 'file_uploader', NOT 'file_stream'
+uploaded_file = st.file_uploader("Upload Market Sample Photo", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file:
+    sizes, processed_img = analyze_onions(uploaded_file, ref_size)
+    
+    if sizes and len(sizes) > 0:
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.image(processed_img, channels="BGR", caption="AI Analysis (Blue=Ref, Green=Onion)")
+        
+        with col2:
+            df = pd.DataFrame(sizes, columns=['Diameter'])
+            mean_val = df['Diameter'].mean()
+            std_val = df['Diameter'].std()
+            
+            st.subheader("Key Metrics")
+            st.metric("Avg Diameter", f"{mean_val:.1f} mm")
+            st.metric("Uniformity (SD)", f"{std_val:.1f} mm")
+            
+            fig = px.histogram(df, x="Diameter", nbins=10, title="Size Distribution")
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Statistical Prediction
+        st.divider()
+        st.subheader("📦 Final Lot Prediction")
+        
+        p_small = (len(df[df['Diameter'] < 45]) / len(df)) * 100
+        p_med = (len(df[(df['Diameter'] >= 45) & (df['Diameter'] <= 70)]) / len(df)) * 100
+        p_jumbo = (len(df[df['Diameter'] > 70]) / len(df)) * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.write(f"**Small (<45mm):** {p_small:.1f}%")
+        c2.write(f"**Medium (45-70mm):** {p_med:.1f}%")
+        c3.write(f"**Jumbo (>70mm):** {p_jumbo:.1f}%")
+
+        if p_small > threshold_small:
+            st.error(f"🚩 REJECT: {p_small:.1f}% small onions exceeds your {threshold_small}% limit.")
+        else:
+            st.success("✅ ACCEPT: Lot meets quality standards.")
+            
+    else:
+        st.warning("Could not detect enough circular objects. Please ensure the onions are spread out and the coin is on the left.")
