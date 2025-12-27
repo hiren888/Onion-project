@@ -3,105 +3,115 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 
-# 1. Safe Import of OpenCV
+# --- SAFETY CHECK ---
 try:
     import cv2
 except ImportError:
-    st.error("CRITICAL ERROR: 'opencv-python-headless' is not installed. Please add it to your requirements.txt file.")
+    st.error("CRITICAL: 'opencv-python-headless' is missing from requirements.txt")
     st.stop()
 
-st.set_page_config(page_title="Onion Procurement AI", layout="wide")
-st.title("🧅 Onion Size Distribution Predictor")
+st.set_page_config(page_title="Onion Quality AI", layout="wide")
+st.title("🧅 Onion Size Predictor")
 
-# --- DEBUGGING STATUS ---
-st.sidebar.success("System Status: Online")
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("Calibration")
+    st.info("Using 65mm Cardboard Reference")
+    # Set default to 65mm as requested
+    ref_size = st.number_input("Reference Circle Dia (mm)", value=65.0)
+    st.warning("⚠️ Place the Reference Circle on the LEFT side.")
 
-def process_image(uploaded_file, ref_diameter_mm):
-    try:
-        # Convert file to opencv image
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        img = cv2.imdecode(file_bytes, 1)
+# --- PROCESSING ENGINE ---
+def analyze_circles(uploaded_file, ref_diameter_mm):
+    # 1. Read Image
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, 1)
+    
+    if img is None:
+        return None, "Error decoding image."
 
-        if img is None:
-            return None, "Error decoding image. Please use a standard JPG or PNG."
-
-        # Grayscale & Blur
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.medianBlur(gray, 5)
-
-        # Detect Circles
-        # Tuned parameters for onions
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 50,
-                                   param1=100, param2=30, minRadius=20, maxRadius=150)
-
-        if circles is None:
-            return None, "No circles detected. Try a photo with better lighting and clear separation between onions."
-
+    # 2. Pre-processing
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.medianBlur(gray, 7) # Slightly stronger blur to smooth paper texture
+    
+    # 3. Detect All Circles
+    # minRadius=15 ensures we catch small onions
+    # maxRadius=150 ensures we catch the big 65mm reference
+    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 40,
+                               param1=50, param2=30, minRadius=15, maxRadius=150)
+    
+    if circles is not None:
         circles = np.uint16(np.around(circles))
         
-        # Sort circles to find the reference object (Assume Left-Most is reference)
+        # 4. Sort: Find the Left-Most Circle (The Reference)
         sorted_circles = circles[0][circles[0][:, 0].argsort()]
         
-        # Get Reference Pixels
-        ref_pixel_diameter = sorted_circles[0][2] * 2
-        pixels_per_mm = ref_pixel_diameter / ref_diameter_mm
+        # 5. Calculate Scale based on the first circle (The 65mm Ref)
+        ref_pixel_width = sorted_circles[0][2] * 2
+        pixels_per_mm = ref_pixel_width / ref_diameter_mm
         
-        diameters = []
+        onion_sizes = []
         
-        # Draw on image
-        # Blue Circle = Reference
-        cv2.circle(img, (sorted_circles[0][0], sorted_circles[0][1]), sorted_circles[0][2], (255, 0, 0), 4)
-        
-        # Green Circles = Onions
-        for c in sorted_circles[1:]:
-            d_mm = (c[2] * 2) / pixels_per_mm
-            diameters.append(d_mm)
-            cv2.circle(img, (c[0], c[1]), c[2], (0, 255, 0), 3)
-            # Label size
-            cv2.putText(img, f"{int(d_mm)}mm", (c[0]-10, c[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        # 6. Draw Visuals
+        for i, c in enumerate(sorted_circles):
+            # Center coordinates and radius
+            center = (c[0], c[1])
+            radius = c[2]
+            
+            if i == 0:
+                # This is the Reference (Draw Blue)
+                cv2.circle(img, center, radius, (255, 0, 0), 4)
+                cv2.putText(img, "REF 65mm", (c[0]-40, c[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            else:
+                # These are Onions (Draw Green)
+                diameter_mm = (radius * 2) / pixels_per_mm
+                onion_sizes.append(diameter_mm)
+                
+                cv2.circle(img, center, radius, (0, 255, 0), 3)
+                # Label size on the image
+                cv2.putText(img, f"{int(diameter_mm)}", (c[0]-15, c[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                            
+        return onion_sizes, img
+    else:
+        return None, "No circles found. Check lighting and contrast."
 
-        return diameters, img
-
-    except Exception as e:
-        return None, f"Processing Error: {str(e)}"
-
-# --- MAIN APP UI ---
-
-ref_size = st.sidebar.number_input("Ref Coin Size (mm)", value=25)
-
-uploaded_file = st.file_uploader("Upload Image", type=['jpg', 'jpeg', 'png'])
+# --- MAIN UI ---
+uploaded_file = st.file_uploader("Upload Photo (Reference on Left)", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
-    with st.spinner('Analyzing onions...'):
-        # Reset file pointer to be safe
-        uploaded_file.seek(0)
+    uploaded_file.seek(0)
+    sizes, result_img = analyze_circles(uploaded_file, ref_size)
+    
+    if sizes is None:
+        st.error(result_img)
+    else:
+        st.image(result_img, channels="BGR", caption="Blue = Reference | Green = Onions", use_container_width=True)
         
-        result, processed_img_or_error = process_image(uploaded_file, ref_size)
-
-        if result is None:
-            # If result is None, the second variable contains the error message
-            st.error(processed_img_or_error)
-        else:
-            # Success!
-            st.image(processed_img_or_error, channels="BGR", caption="Processed Image", use_container_width=True)
+        if len(sizes) > 0:
+            df = pd.DataFrame(sizes, columns=['mm'])
             
-            # Data Frame
-            df = pd.DataFrame(result, columns=['Size_mm'])
-            
-            # Metrics
+            # Key Metrics
             c1, c2, c3 = st.columns(3)
-            c1.metric("Count", len(df))
-            c2.metric("Avg Size", f"{df['Size_mm'].mean():.1f} mm")
-            c3.metric("Std Dev", f"{df['Size_mm'].std():.1f} mm")
+            c1.metric("Sample Count", len(df))
+            c2.metric("Avg Diameter", f"{df['mm'].mean():.1f} mm")
+            c3.metric("Uniformity (SD)", f"{df['mm'].std():.1f} mm")
             
-            # Chart
-            fig = px.histogram(df, x="Size_mm", nbins=15, title="Size Distribution")
+            # Interactive Chart
+            fig = px.histogram(df, x="mm", nbins=12, title="Size Distribution")
+            fig.add_vline(x=45, line_dash="dash", line_color="red", annotation_text="Small Limit")
             st.plotly_chart(fig, use_container_width=True)
             
-            # Quality Check
-            st.subheader("Grading")
-            small_pct = (len(df[df['Size_mm'] < 45]) / len(df)) * 100
-            if small_pct > 10:
-                st.warning(f"⚠️ High percentage of small onions: {small_pct:.1f}%")
-            else:
-                st.success("✅ Lot looks good!")
+            # Procurement Decision Logic
+            small_onions = len(df[df['mm'] < 45])
+            medium_onions = len(df[(df['mm'] >= 45) & (df['mm'] <= 60)])
+            jumbo_onions = len(df[df['mm'] > 60])
+            total = len(df)
+            
+            st.write("---")
+            st.subheader("📊 Lot Grading")
+            col_a, col_b, col_c = st.columns(3)
+            col_a.info(f"Small (<45mm): {small_onions/total*100:.1f}%")
+            col_b.success(f"Medium (45-60mm): {medium_onions/total*100:.1f}%")
+            col_c.warning(f"Jumbo (>60mm): {jumbo_onions/total*100:.1f}%")
