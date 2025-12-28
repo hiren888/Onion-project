@@ -10,19 +10,31 @@ except ImportError:
     st.error("CRITICAL: 'opencv-python-headless' is missing from requirements.txt")
     st.stop()
 
-st.set_page_config(page_title="Onion Quality AI", layout="wide")
-st.title("🧅 Onion Size Predictor")
+st.set_page_config(page_title="Onion AI Manager", layout="wide")
+st.title("🧅 Onion Procurement Assistant (Color Mode)")
 
-# --- SIDEBAR ---
+# --- SIDEBAR TUNING ---
 with st.sidebar:
     st.header("Calibration")
-    st.info("Using 65mm Cardboard Reference")
-    # Set default to 65mm as requested
-    ref_size = st.number_input("Reference Circle Dia (mm)", value=65.0)
-    st.warning("⚠️ Place the Reference Circle on the LEFT side.")
+    ref_size = st.number_input("Reference Coin Size (mm)", value=25.0)
+    
+    st.divider()
+    st.header("Color Tuning (HSV)")
+    st.info("Adjust these to isolate the Onion color.")
+    
+    # Defaults tuned for Brown/Red Onions
+    # Hue: 0-179 covers all colors. Onions are usually Red/Orange (low hue)
+    hue_min = st.slider("Hue Min", 0, 179, 0)
+    hue_max = st.slider("Hue Max", 0, 179, 179)
+    # Saturation: 0 is gray/white, 255 is vibrant color
+    sat_min = st.slider("Saturation Min", 0, 255, 30, help="Increase this if it detects the white table.") 
+    # Value: Brightness
+    val_min = st.slider("Brightness Min", 0, 255, 0)
+    
+    min_area = st.number_input("Min Object Area", value=3000, step=500, help="Increase to ignore small dirt specks.")
 
-# --- PROCESSING ENGINE ---
-def analyze_circles(uploaded_file, ref_diameter_mm):
+# --- COLOR PROCESSING ENGINE ---
+def analyze_color(uploaded_file, ref_diameter_mm, h_min, h_max, s_min, v_min):
     # 1. Read Image
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
@@ -30,88 +42,104 @@ def analyze_circles(uploaded_file, ref_diameter_mm):
     if img is None:
         return None, "Error decoding image."
 
-    # 2. Pre-processing
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.medianBlur(gray, 7) # Slightly stronger blur to smooth paper texture
+    # 2. Convert to HSV Color Space
+    # HSV (Hue, Saturation, Value) is better for filtering than RGB
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     
-    # 3. Detect All Circles
-    # minRadius=15 ensures we catch small onions
-    # maxRadius=150 ensures we catch the big 65mm reference
-    circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1, 40,
-                               param1=50, param2=30, minRadius=15, maxRadius=150)
+    # 3. Create Color Mask
+    lower_bound = np.array([h_min, s_min, v_min])
+    upper_bound = np.array([h_max, 255, 255])
     
-    if circles is not None:
-        circles = np.uint16(np.around(circles))
-        
-        # 4. Sort: Find the Left-Most Circle (The Reference)
-        sorted_circles = circles[0][circles[0][:, 0].argsort()]
-        
-        # 5. Calculate Scale based on the first circle (The 65mm Ref)
-        ref_pixel_width = sorted_circles[0][2] * 2
-        pixels_per_mm = ref_pixel_width / ref_diameter_mm
-        
-        onion_sizes = []
-        
-        # 6. Draw Visuals
-        for i, c in enumerate(sorted_circles):
-            # Center coordinates and radius
-            center = (c[0], c[1])
-            radius = c[2]
+    # This creates a Black & White image (White = Onion, Black = Table)
+    mask = cv2.inRange(hsv, lower_bound, upper_bound)
+    
+    # 4. Clean up Mask (Remove noise)
+    kernel = np.ones((5,5), np.uint8)
+    # "Open" removes white dots (noise)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    # "Dilate" fills holes inside the onion
+    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=2)
+    
+    # 5. Find Contours on the Mask
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None, "No objects detected. Try lowering 'Saturation Min'."
+
+    # 6. Filter Small Objects
+    valid_objects = []
+    for c in contours:
+        if cv2.contourArea(c) > min_area:
+            valid_objects.append(c)
             
-            if i == 0:
-                # This is the Reference (Draw Blue)
-                cv2.circle(img, center, radius, (255, 0, 0), 4)
-                cv2.putText(img, "REF 65mm", (c[0]-40, c[1]), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-            else:
-                # These are Onions (Draw Green)
-                diameter_mm = (radius * 2) / pixels_per_mm
-                onion_sizes.append(diameter_mm)
-                
-                cv2.circle(img, center, radius, (0, 255, 0), 3)
-                # Label size on the image
-                cv2.putText(img, f"{int(diameter_mm)}", (c[0]-15, c[1]), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                            
-        return onion_sizes, img
-    else:
-        return None, "No circles found. Check lighting and contrast."
+    if not valid_objects:
+        return None, "Objects too small. Decrease 'Min Object Area'."
+
+    # Sort Left-to-Right (Assume Leftmost is Reference)
+    valid_objects = sorted(valid_objects, key=lambda c: cv2.boundingRect(c)[0])
+    
+    # 7. Measurement Logic
+    onion_sizes = []
+    result_img = img.copy()
+    
+    # Draw Mask preview for debugging
+    mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    
+    # Assume first object is Reference
+    ref_contour = valid_objects[0]
+    ((_, _), ref_radius) = cv2.minEnclosingCircle(ref_contour)
+    ref_px_width = ref_radius * 2
+    pixels_per_mm = ref_px_width / ref_diameter_mm
+    
+    for i, c in enumerate(valid_objects):
+        ((cx, cy), radius) = cv2.minEnclosingCircle(c)
+        center = (int(cx), int(cy))
+        radius = int(radius)
+        diameter_mm = (radius * 2) / pixels_per_mm
+        
+        if i == 0:
+            # Reference
+            cv2.circle(result_img, center, radius, (255, 0, 0), 3)
+            cv2.putText(result_img, "REF", (center[0]-20, center[1]), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        else:
+            # Onions
+            onion_sizes.append(diameter_mm)
+            cv2.circle(result_img, center, radius, (0, 255, 0), 3)
+            cv2.putText(result_img, f"{int(diameter_mm)}", (center[0]-15, center[1]), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+    return onion_sizes, result_img, mask_bgr
 
 # --- MAIN UI ---
-uploaded_file = st.file_uploader("Upload Photo (Reference on Left)", type=['jpg', 'png', 'jpeg'])
+uploaded_file = st.file_uploader("Upload Photo", type=['jpg', 'png', 'jpeg'])
 
 if uploaded_file:
     uploaded_file.seek(0)
-    sizes, result_img = analyze_circles(uploaded_file, ref_size)
+    # Run Analysis
+    result = analyze_color(uploaded_file, ref_size, hue_min, hue_max, sat_min, val_min)
     
-    if sizes is None:
-        st.error(result_img)
-    else:
-        st.image(result_img, channels="BGR", caption="Blue = Reference | Green = Onions", use_container_width=True)
+    if result and len(result) == 3: # Success
+        sizes, final_img, debug_mask = result
+        
+        # Show Results
+        col_A, col_B = st.columns(2)
+        with col_A:
+            st.image(final_img, channels="BGR", caption="Final Detection (Green Circles)", use_container_width=True)
+        with col_B:
+            st.image(debug_mask, channels="BGR", caption="Computer Vision Mask (White=Object)", use_container_width=True)
+            st.info("👆 If the white shape has holes, LOWER 'Saturation Min'. If the background is white, INCREASE it.")
         
         if len(sizes) > 0:
             df = pd.DataFrame(sizes, columns=['mm'])
-            
-            # Key Metrics
             c1, c2, c3 = st.columns(3)
-            c1.metric("Sample Count", len(df))
-            c2.metric("Avg Diameter", f"{df['mm'].mean():.1f} mm")
-            c3.metric("Uniformity (SD)", f"{df['mm'].std():.1f} mm")
+            c1.metric("Count", len(df))
+            c2.metric("Avg Size", f"{df['mm'].mean():.1f} mm")
+            c3.metric("Uniformity", f"{df['mm'].std():.1f} mm")
             
-            # Interactive Chart
-            fig = px.histogram(df, x="mm", nbins=12, title="Size Distribution")
-            fig.add_vline(x=45, line_dash="dash", line_color="red", annotation_text="Small Limit")
+            fig = px.histogram(df, x="mm", nbins=10, title="Size Distribution")
             st.plotly_chart(fig, use_container_width=True)
             
-            # Procurement Decision Logic
-            small_onions = len(df[df['mm'] < 45])
-            medium_onions = len(df[(df['mm'] >= 45) & (df['mm'] <= 60)])
-            jumbo_onions = len(df[df['mm'] > 60])
-            total = len(df)
-            
-            st.write("---")
-            st.subheader("📊 Lot Grading")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.info(f"Small (<45mm): {small_onions/total*100:.1f}%")
-            col_b.success(f"Medium (45-60mm): {medium_onions/total*100:.1f}%")
-            col_c.warning(f"Jumbo (>60mm): {jumbo_onions/total*100:.1f}%")
+    elif result: # Error Message
+        st.error(result[1])
+        st.warning("Tip: If the image is black, try sliding 'Saturation Min' to 20.")
