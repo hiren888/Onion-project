@@ -154,5 +154,7 @@ if uploaded_file:
             c2.image(mask_o, caption="Onion Mask (Processed)", use_container_width=True)
             
         if sizes:
-            df = pd.DataFrame(sizes, columns=['mm'])
-            m1, m2 =
+            m1, m2 = st.columns(2) 
+            
+            m1.metric("Avg Size", f"{df['mm'].mean():.1f} mm")
+            m2.metric("Uniformity", f"{df['mm'].std():.1f} mm")
