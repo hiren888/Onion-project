@@ -16,7 +16,7 @@ st.title("🧅 Onion AI: Production Mode")
 # --- SIDEBAR SETTINGS ---
 with st.sidebar:
     st.header("1. Calibration")
-    st.info("⚠️ Use a SOLID Blue Object (Cap/Chip).")
+    st.info("⚠️ Use a SOLID Green Object (Cap/Chip).")
     ref_real_size = st.number_input("Reference Diameter (mm)", value=30.0)
 
     st.divider()
