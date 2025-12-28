@@ -10,32 +10,38 @@ except ImportError:
     st.error("CRITICAL: 'opencv-python-headless' is missing from requirements.txt")
     st.stop()
 
-st.set_page_config(page_title="Onion AI Pro", layout="wide")
-st.title("🧅 Onion AI: Pro Calibration Mode")
+st.set_page_config(page_title="Onion AI Ultimate", layout="wide")
+st.title("🧅 Onion AI: Ultimate Mode")
 
 # --- SIDEBAR SETTINGS ---
 with st.sidebar:
-    st.header("1. Calibration (The Blue Object)")
-    st.info("Use a BLUE circle (e.g., plastic bottle cap) as reference.")
+    st.header("1. Calibration (Blue Object)")
+    st.info("Use a BLUE circle (e.g., bottle cap) as reference.")
     ref_real_size = st.number_input("Reference Size (mm)", value=30.0)
-    
+
     st.divider()
-    st.header("2. Onion Filters")
+    st.header("2. Onion Color Tuning")
+    st.info("Adjust these to isolate the onions.")
+    
+    # Full HSV Controls
+    # Onions are often Hue 0-20 or 160-180. 
+    # If Min > Max, the app automatically handles the "Red Wrap-around".
+    h_min = st.slider("Hue Min", 0, 179, 0, help="0 is Red, 60 Green, 120 Blue.")
+    h_max = st.slider("Hue Max", 0, 179, 25, help="Try 20-30 for Brown/Red onions.")
+    s_min = st.slider("Saturation Min", 0, 255, 40, help="Increase to remove white table.")
+    v_min = st.slider("Brightness (Value) Min", 0, 255, 40, help="Increase to ignore shadows.")
+
+    st.divider()
+    st.header("3. Shape Filters")
     min_area = st.number_input("Min Area (Size)", value=2000)
+    circ_thresh = st.slider("Min Circularity", 0.0, 1.0, 0.65, step=0.05, 
+                            help="1.0 = Perfect Circle. Lower for potatoes/irregular shapes.")
     
-    # NEW: Circularity Threshold
-    # 1.0 is perfect circle. 0.7 allows slightly oval shapes.
-    circularity_thresh = st.slider("Min Circularity", 0.0, 1.0, 0.7, step=0.05, 
-                                   help="1.0 = Perfect Circle. Lower this if onions are oval.")
-
     st.divider()
-    st.header("3. Color Tuning")
     show_masks = st.checkbox("Show Debug Masks", value=False)
-    # Saturation Threshold for Onions
-    onion_sat_min = st.slider("Onion Saturation Min", 0, 255, 40, help="Increase if table is being detected as onion.")
 
-# --- ADVANCED PROCESSING ---
-def analyze_dual_color(uploaded_file, real_ref_mm, circ_thresh, sat_min):
+# --- PROCESSING ENGINE ---
+def analyze_ultimate(uploaded_file, real_ref_mm, h_min, h_max, s_min, v_min, circ_thresh):
     # 1. Read Image
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
@@ -44,7 +50,7 @@ def analyze_dual_color(uploaded_file, real_ref_mm, circ_thresh, sat_min):
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     
     # --- STEP A: FIND REFERENCE (BLUE) ---
-    # Blue is typically Hue 100-130 in OpenCV
+    # We keep Blue fixed to keep it simple, as it works well.
     lower_blue = np.array([100, 150, 50])
     upper_blue = np.array([140, 255, 255])
     mask_ref = cv2.inRange(hsv, lower_blue, upper_blue)
@@ -57,28 +63,41 @@ def analyze_dual_color(uploaded_file, real_ref_mm, circ_thresh, sat_min):
     cnts_ref, _ = cv2.findContours(mask_ref, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if not cnts_ref:
-        return None, "Reference Not Found! Please place a BLUE object (like a bottle cap) in the photo."
+        return None, "Reference Not Found! Please place a BLUE object in the photo."
     
-    # Get the biggest blue object (in case there's noise)
+    # Get the biggest blue object
     ref_contour = max(cnts_ref, key=cv2.contourArea)
     ((_, _), ref_radius) = cv2.minEnclosingCircle(ref_contour)
     px_per_mm = (ref_radius * 2) / real_ref_mm
     
-    # --- STEP B: FIND ONIONS (RED/BROWN) ---
-    # Onions are Low Hue (0-20) and High Hue (160-180) - basically Red/Orange
-    # We create two masks and combine them to catch all red shades
-    lower_red1 = np.array([0, sat_min, 50])
-    upper_red1 = np.array([20, 255, 255])
-    lower_red2 = np.array([160, sat_min, 50])
-    upper_red2 = np.array([180, 255, 255])
-    
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask_onion = cv2.add(mask1, mask2)
+    # --- STEP B: FIND ONIONS (USER SETTINGS) ---
+    # Handle "Red Wrap-Around" Logic
+    # If user sets Min=170 and Max=10, we need TWO masks combined.
+    if h_min > h_max:
+        # Range 1: h_min to 179
+        lower1 = np.array([h_min, s_min, v_min])
+        upper1 = np.array([179, 255, 255])
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        
+        # Range 2: 0 to h_max
+        lower2 = np.array([0, s_min, v_min])
+        upper2 = np.array([h_max, 255, 255])
+        mask2 = cv2.inRange(hsv, lower2, upper2)
+        
+        mask_onion = cv2.add(mask1, mask2)
+    else:
+        # Standard Range (e.g., 10 to 30)
+        lower = np.array([h_min, s_min, v_min])
+        upper = np.array([h_max, 255, 255])
+        mask_onion = cv2.inRange(hsv, lower, upper)
     
     # Clean up Onion Mask
-    mask_onion = cv2.morphologyEx(mask_onion, cv2.MORPH_OPEN, kernel, iterations=2)
-    mask_onion = cv2.morphologyEx(mask_onion, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_onion = cv2.morphologyEx(mask_onion, cv2.MORPH_OPEN, kernel, iterations=2) # Remove noise
+    mask_onion = cv2.morphologyEx(mask_onion, cv2.MORPH_CLOSE, kernel, iterations=2) # Close holes
+    
+    # We subtract the Reference Mask from the Onion Mask
+    # This prevents the Blue Cap from being detected as an onion if colors overlap
+    mask_onion = cv2.subtract(mask_onion, mask_ref)
     
     cnts_onion, _ = cv2.findContours(mask_onion, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -92,7 +111,6 @@ def analyze_dual_color(uploaded_file, real_ref_mm, circ_thresh, sat_min):
             perimeter = cv2.arcLength(c, True)
             if perimeter == 0: continue
             
-            # Formula: (4 * pi * Area) / (Perimeter^2)
             circularity = (4 * np.pi * area) / (perimeter ** 2)
             
             if circularity >= circ_thresh:
@@ -130,17 +148,17 @@ uploaded_file = st.file_uploader("Upload Photo (Blue Ref + Onions)", type=['jpg'
 
 if uploaded_file:
     uploaded_file.seek(0)
-    result = analyze_dual_color(uploaded_file, ref_real_size, circularity_thresh, onion_sat_min)
+    result = analyze_ultimate(uploaded_file, ref_real_size, h_min, h_max, s_min, v_min, circ_thresh)
     
     if result and len(result) == 4:
         sizes, final_img, mask_o, mask_r = result
         
-        st.image(final_img, channels="BGR", caption="Blue=Ref | Green=Valid Onion | Red=Not Circular", use_container_width=True)
+        st.image(final_img, channels="BGR", caption="Blue=Ref | Green=Valid Onion | Red=Non-Circular", use_container_width=True)
         
         if show_masks:
             c1, c2 = st.columns(2)
-            c1.image(mask_r, caption="Blue Mask (Reference)", use_container_width=True)
-            c2.image(mask_o, caption="Red/Brown Mask (Onions)", use_container_width=True)
+            c1.image(mask_r, caption="Blue Mask (Ref)", use_container_width=True)
+            c2.image(mask_o, caption="Onion Mask (Based on Sliders)", use_container_width=True)
             
         if sizes:
             df = pd.DataFrame(sizes, columns=['mm'])
