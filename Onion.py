@@ -186,3 +186,18 @@ if uploaded_file:
         st.image(final_img, channels="BGR", caption="Analyzed Image", use_container_width=True)
         
         if show_masks:
+            c1, c2 = st.columns(2)
+            c1.image(mask_r, caption="Green Reference Mask", use_container_width=True)
+            c2.image(mask_o, caption="Onion Mask", use_container_width=True)
+            
+        if sizes:
+            df = pd.DataFrame(sizes, columns=['mm'])
+            m1, m2 = st.columns(2)
+            m1.metric("Avg Size", f"{df['mm'].mean():.1f} mm")
+            m2.metric("Uniformity", f"{df['mm'].std():.1f} mm")
+            
+            fig = px.histogram(df, x="mm", nbins=15, title="Size Distribution")
+            st.plotly_chart(fig, use_container_width=True)
+            
+    elif result:
+        st.error(result[1])
