@@ -154,7 +154,13 @@ if uploaded_file:
             c2.image(mask_o, caption="Onion Mask (Processed)", use_container_width=True)
             
         if sizes:
-            m1, m2 = st.columns(2) 
-            
+            df = pd.DataFrame(sizes, columns=['mm'])
+            m1, m2 = st.columns(2)
             m1.metric("Avg Size", f"{df['mm'].mean():.1f} mm")
             m2.metric("Uniformity", f"{df['mm'].std():.1f} mm")
+            
+            fig = px.histogram(df, x="mm", nbins=15, title="Size Distribution")
+            st.plotly_chart(fig, use_container_width=True)
+            
+    elif result:
+        st.error(result[1])
